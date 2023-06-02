@@ -1,0 +1,161 @@
+_schema-version: "3.1"
+ID: cap_deploy
+description: A simple CAP project.
+version: 1.0.0
+modules:
+  - name: cap_deploy-srv
+    type: nodejs
+    path: gen/srv
+    requires:
+      - name: cap_deploy-db
+      - name: uaa_cap_deploy
+    provides:
+      - name: srv-api
+        properties:
+          srv-url: ${default-url}
+    parameters:
+      buildpack: nodejs_buildpack
+    build-parameters:
+      builder: npm-ci
+  - name: cap_deploy-db-deployer
+    type: hdb
+    path: gen/db
+    requires:
+      - name: cap_deploy-db
+    parameters:
+      buildpack: nodejs_buildpack
+  - name: cap_deploy-destination-content
+    type: com.sap.application.content
+    requires:
+      - name: cap_deploy-destination-service
+        parameters:
+          content-target: true
+      - name: cap_deploy_html_repo_host
+        parameters:
+          service-key:
+            name: cap_deploy_html_repo_host-key
+      - name: uaa_cap_deploy
+        parameters:
+          service-key:
+            name: uaa_cap_deploy-key
+      - name: srv-api
+    parameters:
+      content:
+        instance:
+          destinations:
+            - Name: cap_deploy_html_repo_host
+              ServiceInstanceName: cap_deploy-html5-app-host-service
+              ServiceKeyName: cap_deploy_html_repo_host-key
+              sap.cloud.service: mapprouter
+            - Authentication: OAuth2UserTokenExchange
+              Name: uaa_cap_deploy
+              ServiceInstanceName: uaa_cap_deploy
+              ServiceKeyName: uaa_cap_deploy-key
+              sap.cloud.service: mapprouter
+            - Authentication: OAuth2UserTokenExchange
+              Name: srv-api
+              TokenServiceInstanceName: uaa_cap_deploy
+              TokenServiceKeyName: uaa_cap_deploy-key
+              URL: ~{srv-api/srv-url}
+              sap.cloud.service: mapprouter 
+          existing_destinations_policy: update
+    build-parameters:
+      no-source: true
+  - name: cap_deploy-app-content
+    type: com.sap.application.content
+    path: .
+    requires:
+      - name: cap_deploy_html_repo_host
+        parameters:
+          content-target: true
+    build-parameters:
+      build-result: resources
+      requires:
+        - artifacts:
+            - capdeploy.zip
+          name: capdeploy
+          target-path: resources/
+  - name: capdeploy
+    type: html5
+    path: app/cap_deploy
+    build-parameters:
+      build-result: dist
+      builder: custom
+      commands:
+        - npm install
+        - npm run build:cf
+      supported-platforms:
+        []
+
+  - name: cap_deploy
+    type: approuter.nodejs
+    path: app/ # from cds.env.folders. Consider also cds.env.build.target -> gen/app
+    parameters:
+      keep-existing-routes: true
+      disk-quota: 1024M
+      memory: 1024M
+    requires:
+      - name: srv-api
+        group: destinations
+        properties:
+          name: srv-api # must be used in xs-app.json as well
+          url: ~{srv-url}
+          forwardAuthToken: true
+      - name: uaa_cap_deploy
+resources:
+  - name: cap_deploy-db
+    type: com.sap.xs.hdi-container  
+    parameters:
+      service: hana
+      service-plan: hdi-shared
+  - name: cap_deploy-destination-service
+    type: org.cloudfoundry.managed-service
+    requires:
+      - name: srv-api
+    parameters:
+      config:
+        HTML5Runtime_enabled: true
+        init_data:
+          instance:
+            destinations:
+              - Name: cap_deploy-srv
+                Description: cap_deploy NodeJS backend service
+                Authentication: NoAuthentication
+                ProxyType: Internet
+                Type: HTTP
+                URL: ~{srv-api/srv-url}
+                HTML5.DynamicDestination: true
+                HTML5.ForwardAuthToken: true
+              - Authentication: NoAuthentication
+                Name: ui5
+                ProxyType: Internet
+                Type: HTTP
+                URL: https://ui5.sap.com
+            existing_destinations_policy: update
+        version: 1.0.0
+      service: destination
+      service-name: cap_deploy-destination-service
+      service-plan: lite
+  - name: cap_deploy_html_repo_host
+    type: org.cloudfoundry.managed-service
+    parameters:
+      service: html5-apps-repo
+      service-name: cap_deploy-html5-app-host-service
+      service-plan: app-host
+  - name: uaa_cap_deploy
+    type: org.cloudfoundry.managed-service
+    parameters:
+      path: ./xs-security.json
+      service: xsuaa
+      service-plan: application
+      config:
+        xsappname: cap_deployv1
+        tenant-mode: dedicated
+parameters:
+  deploy_mode: html5-repo
+  enable-parallel-deployments: true
+build-parameters:
+  before-all:
+    - builder: custom
+      commands:
+        - npx -p @sap/cds-dk cds build --production
